@@ -3,7 +3,6 @@ const WebSocket = require('ws');
 
 const PORT = process.env.PORT || 8080;
 
-// HTTP server so Render sees the app as healthy
 const server = http.createServer((req, res) => {
   if (req.url === '/' && req.method === 'GET') {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
@@ -16,9 +15,8 @@ const server = http.createServer((req, res) => {
 
 const wss = new WebSocket.Server({ server });
 
-// ------------------ Game rooms ------------------
-const rooms = new Map();          // roomId -> { game, players: [ws], public, code, hostWs, ... }
-const tttWaiting = [];           // simple queue for tic-tac-toe
+const rooms = new Map();
+const tttWaiting = [];
 
 function generateId() {
   return Math.random().toString(36).substring(2, 8);
@@ -28,7 +26,6 @@ function sendTo(ws, data) {
   if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(data));
 }
 
-// ------------------ WebSocket handling ------------------
 wss.on('connection', (ws) => {
   ws.roomId = null;
   ws.game = null;
@@ -41,13 +38,11 @@ wss.on('connection', (ws) => {
       return sendTo(ws, { type: 'error', message: 'Invalid JSON' });
     }
 
-    // ---- Tic-Tac-Toe (unchanged) ----
     if (msg.game === 'tic-tac-toe') {
       handleTTT(ws, msg);
       return;
     }
 
-    // ---- Chess ----
     if (msg.game !== 'chess') return;
 
     switch (msg.type) {
@@ -67,7 +62,6 @@ wss.on('connection', (ws) => {
       }
 
       case 'join_public': {
-        // find a public room with exactly one waiting player
         let foundRoom = null;
         for (const [id, room] of rooms) {
           if (room.game === 'chess' && room.public &&
@@ -79,15 +73,13 @@ wss.on('connection', (ws) => {
           }
         }
         if (!foundRoom) {
-          sendTo(ws, { type: 'error', message: 'No public room available. Create one first.' });
+          sendTo(ws, { type: 'error', message: 'No public room available.' });
           return;
         }
         foundRoom.players.push(ws);
         ws.game = 'chess';
-        // start the game
         foundRoom.players.forEach((player, idx) => {
-          const symbol = idx === 0 ? 'w' : 'b';
-          sendTo(player, { type: 'start', symbol });
+          sendTo(player, { type: 'start', symbol: idx === 0 ? 'w' : 'b' });
         });
         break;
       }
@@ -95,7 +87,7 @@ wss.on('connection', (ws) => {
       case 'create_private': {
         const code = msg.code;
         if (!code || !/^[A-Za-z0-9]+$/.test(code)) {
-          sendTo(ws, { type: 'error', message: 'Invalid code. Use only letters and numbers.' });
+          sendTo(ws, { type: 'error', message: 'Invalid code. Use letters and numbers only.' });
           return;
         }
         const roomId = generateId();
@@ -104,7 +96,7 @@ wss.on('connection', (ws) => {
           players: [ws],
           hostWs: ws,
           public: false,
-          code: code,
+          code,
         });
         ws.roomId = roomId;
         ws.game = 'chess';
@@ -115,7 +107,7 @@ wss.on('connection', (ws) => {
       case 'join_private': {
         const code = msg.code;
         if (!code) {
-          sendTo(ws, { type: 'error', message: 'Please provide a room code.' });
+          sendTo(ws, { type: 'error', message: 'Please enter a room code.' });
           return;
         }
         let targetRoom = null;
@@ -131,15 +123,28 @@ wss.on('connection', (ws) => {
           }
         }
         if (!targetRoom) {
-          sendTo(ws, { type: 'error', message: 'No private room found with that code.' });
+          sendTo(ws, { type: 'error', message: 'No such room found for that pairing code. Check the code and try again.' });
           return;
         }
         targetRoom.players.push(ws);
         ws.game = 'chess';
         targetRoom.players.forEach((player, idx) => {
-          const symbol = idx === 0 ? 'w' : 'b';
-          sendTo(player, { type: 'start', symbol });
+          sendTo(player, { type: 'start', symbol: idx === 0 ? 'w' : 'b' });
         });
+        break;
+      }
+
+      case 'leave_room': {
+        // player wants to cancel waiting
+        if (ws.roomId) {
+          const room = rooms.get(ws.roomId);
+          if (room && room.players.length === 1) {
+            // delete the empty room
+            rooms.delete(ws.roomId);
+            sendTo(ws, { type: 'room_cancelled' });
+          }
+          ws.roomId = null;
+        }
         break;
       }
 
@@ -162,15 +167,10 @@ wss.on('connection', (ws) => {
         }
         break;
       }
-
-      default:
-        // ignore unknown message types
-        break;
     }
   });
 
   ws.on('close', () => {
-    // clean up when a player disconnects
     if (ws.roomId) {
       const room = rooms.get(ws.roomId);
       if (room) {
@@ -182,13 +182,11 @@ wss.on('connection', (ws) => {
         rooms.delete(ws.roomId);
       }
     }
-    // remove from tic-tac-toe waiting list if present
     const tttIdx = tttWaiting.indexOf(ws);
     if (tttIdx !== -1) tttWaiting.splice(tttIdx, 1);
   });
 });
 
-// ---------- Tic-Tac-Toe handling ----------
 function handleTTT(ws, msg) {
   if (msg.type === 'join') {
     if (tttWaiting.length > 0) {
