@@ -1,9 +1,23 @@
+const http = require('http');
 const WebSocket = require('ws');
 
 const PORT = process.env.PORT || 8080;
-const wss = new WebSocket.Server({ port: PORT });
 
-// room structure: { game: 'tic-tac-toe'|'chess', players: [ws1, ws2], createdAt: timestamp }
+// Create an HTTP server that responds to health checks
+const server = http.createServer((req, res) => {
+  if (req.url === '/' && req.method === 'GET') {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end('OK');
+  } else {
+    res.writeHead(404);
+    res.end();
+  }
+});
+
+// Attach WebSocket server to the HTTP server
+const wss = new WebSocket.Server({ server });
+
+// room handling (unchanged)
 const rooms = new Map();
 
 function generateId() {
@@ -21,10 +35,9 @@ wss.on('connection', (ws) => {
     }
 
     if (msg.type === 'join') {
-      const game = msg.game; // "tic-tac-toe" or "chess"
+      const game = msg.game;
       let roomId = null;
 
-      // find a waiting room for this game
       for (const [id, room] of rooms) {
         if (room.game === game && room.players.length === 1 && room.players[0].readyState === WebSocket.OPEN) {
           roomId = id;
@@ -33,15 +46,13 @@ wss.on('connection', (ws) => {
       }
 
       if (roomId) {
-        // join existing room
         const room = rooms.get(roomId);
         room.players.push(ws);
         ws.roomId = roomId;
         const symbol = room.players.indexOf(ws) === 0
-          ? (game === 'tic-tac-toe' ? 'X' : 'w')   // first = X / white
-          : (game === 'tic-tac-toe' ? 'O' : 'b');   // second = O / black
+          ? (game === 'tic-tac-toe' ? 'X' : 'w')
+          : (game === 'tic-tac-toe' ? 'O' : 'b');
 
-        // tell both players the game starts
         room.players.forEach((player, idx) => {
           const playerSymbol = idx === 0
             ? (game === 'tic-tac-toe' ? 'X' : 'w')
@@ -49,11 +60,10 @@ wss.on('connection', (ws) => {
           player.send(JSON.stringify({
             type: 'start',
             symbol: playerSymbol,
-            turn: game === 'tic-tac-toe' ? 'X' : 'w'   // X / white always starts
+            turn: game === 'tic-tac-toe' ? 'X' : 'w'
           }));
         });
       } else {
-        // create new room and wait
         roomId = generateId();
         rooms.set(roomId, { game, players: [ws], createdAt: Date.now() });
         ws.roomId = roomId;
@@ -69,21 +79,21 @@ wss.on('connection', (ws) => {
     }
   });
 
-  ws.on('close', () => handleDisconnect(ws));
+  ws.on('close', () => {
+    if (ws.roomId) {
+      const room = rooms.get(ws.roomId);
+      if (room) {
+        room.players.forEach(p => {
+          if (p !== ws && p.readyState === WebSocket.OPEN) {
+            p.send(JSON.stringify({ type: 'opponent_disconnected' }));
+          }
+        });
+        rooms.delete(ws.roomId);
+      }
+    }
+  });
 });
 
-function handleDisconnect(ws) {
-  if (ws.roomId) {
-    const room = rooms.get(ws.roomId);
-    if (room) {
-      room.players.forEach(p => {
-        if (p !== ws && p.readyState === WebSocket.OPEN) {
-          p.send(JSON.stringify({ type: 'opponent_disconnected' }));
-        }
-      });
-      rooms.delete(ws.roomId);
-    }
-  }
-}
-
-console.log(`WebSocket server running on port ${PORT}`);
+server.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});
