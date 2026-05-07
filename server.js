@@ -117,6 +117,14 @@ wss.on('connection', (ws) => {
           sendTo(ws, { type: 'error', message: 'Invalid code. Use letters and numbers only.' });
           return;
         }
+        // Check if code is already in use
+        for (const room of rooms.values()) {
+          if (room.game === game && !room.public && room.code === code &&
+              room.players[0] && room.players[0].readyState === WebSocket.OPEN) {
+            sendTo(ws, { type: 'error', message: 'Code already in use.' });
+            return;
+          }
+        }
         const hostColor = game === 'chess' ? (msg.color || 'w') : null;
         const roomId = generateId();
         rooms.set(roomId, {
@@ -138,7 +146,7 @@ wss.on('connection', (ws) => {
         break;
       }
 
-      // ─── Join private ───
+      // ─── Join private (fresh join) ───
       case 'join_private': {
         const code = msg.code;
         if (!code) {
@@ -148,8 +156,12 @@ wss.on('connection', (ws) => {
         let targetRoom = null;
         for (const [id, room] of rooms) {
           if (room.game === game && !room.public && room.code === code &&
-              room.players[0] && room.players[0].readyState === WebSocket.OPEN &&
-              !room.players[1]) {
+              room.players[0] && room.players[0].readyState === WebSocket.OPEN) {
+            if (room.players[1] && room.players[1].readyState === WebSocket.OPEN) {
+              // Host already playing with someone else
+              sendTo(ws, { type: 'error', message: 'Cannot join this game.' });
+              return;
+            }
             targetRoom = room;
             ws.roomId = id;
             break;
@@ -187,12 +199,16 @@ wss.on('connection', (ws) => {
         break;
       }
 
-      // ─── Reconnect (opponent only) ───
-      case 'reconnect': {
+      // ─── Rejoin (explicit, uses stored roomId) ───
+      case 'rejoin': {
         const { roomId, symbol, code } = msg;
+        if (!roomId || !symbol) {
+          sendTo(ws, { type: 'error', message: 'No previous session found.' });
+          return;
+        }
         const room = rooms.get(roomId);
-        if (!room) {
-          sendTo(ws, { type: 'error', message: 'Room no longer exists.' });
+        if (!room || room.game !== game) {
+          sendTo(ws, { type: 'error', message: 'Session expired or no longer exists.' });
           return;
         }
         if (room.public === false) {
@@ -202,29 +218,25 @@ wss.on('connection', (ws) => {
           }
         }
         const playerIdx = (symbol === 'X' || symbol === 'w') ? 0 : 1;
-        if (playerIdx === 0) {
-          sendTo(ws, { type: 'error', message: 'Cannot reconnect as host.' });
-          return;
-        }
         const existing = room.players[playerIdx];
         if (existing && existing.readyState !== WebSocket.OPEN) {
-          // Replace the disconnected opponent
+          // Replace the disconnected player
           room.players[playerIdx] = ws;
           ws.roomId = roomId;
           ws.game = game;
           ws.symbol = symbol;
-          ws.isHost = false;
+          ws.isHost = playerIdx === 0;
           if (room.disconnectTimers[playerIdx]) {
             clearTimeout(room.disconnectTimers[playerIdx]);
             room.disconnectTimers[playerIdx] = null;
           }
           sendTo(ws, { type: 'resume', symbol, turn: room.turn, board: room.board });
-          const host = room.players[0];
-          if (host && host.readyState === WebSocket.OPEN) {
-            sendTo(host, { type: 'opponent_reconnected' });
+          const other = room.players[1 - playerIdx];
+          if (other && other.readyState === WebSocket.OPEN) {
+            sendTo(other, { type: 'opponent_reconnected' });
           }
         } else {
-          sendTo(ws, { type: 'error', message: 'Cannot reconnect to this game.' });
+          sendTo(ws, { type: 'error', message: 'Cannot rejoin this session.' });
         }
         break;
       }
@@ -249,7 +261,6 @@ wss.on('connection', (ws) => {
           const room = rooms.get(ws.roomId);
           if (room) {
             if (ws.isHost) {
-              // Destroy instantly
               const other = room.players[1];
               if (other && other.readyState === WebSocket.OPEN) {
                 sendTo(other, { type: 'room_destroyed', message: 'Host left the game.' });
@@ -257,7 +268,6 @@ wss.on('connection', (ws) => {
               }
               rooms.delete(ws.roomId);
             } else {
-              // Opponent left – start timer but also notify host
               const playerIdx = 1;
               if (room.disconnectTimers[playerIdx]) clearTimeout(room.disconnectTimers[playerIdx]);
               room.disconnectTimers[playerIdx] = setTimeout(() => {
@@ -312,17 +322,14 @@ wss.on('connection', (ws) => {
       const room = rooms.get(ws.roomId);
       if (room) {
         if (ws.isHost) {
-          // Host left -> destroy room immediately
           const other = room.players[1];
           if (other && other.readyState === WebSocket.OPEN) {
             sendTo(other, { type: 'room_destroyed', message: 'Host left the game.' });
             other.close();
           }
-          // clear timers
           room.disconnectTimers.forEach(t => clearTimeout(t));
           rooms.delete(ws.roomId);
         } else {
-          // Opponent disconnected -> start 5‑minute timer
           const playerIdx = 1;
           if (room.disconnectTimers[playerIdx]) clearTimeout(room.disconnectTimers[playerIdx]);
           room.disconnectTimers[playerIdx] = setTimeout(() => {
@@ -335,7 +342,6 @@ wss.on('connection', (ws) => {
               rooms.delete(ws.roomId);
             }
           }, 300000);
-          // Notify host
           const host = room.players[0];
           if (host && host.readyState === WebSocket.OPEN) {
             sendTo(host, { type: 'opponent_disconnected' });
