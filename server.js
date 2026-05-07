@@ -31,6 +31,11 @@ wss.on('connection', (ws) => {
   ws.symbol = null;
   ws.isHost = false;
 
+  // Ping every 30s to keep connection alive
+  ws._pingInterval = setInterval(() => {
+    if (ws.readyState === WebSocket.OPEN) ws.ping();
+  }, 30000);
+
   ws.on('message', (raw) => {
     let msg;
     try {
@@ -43,7 +48,6 @@ wss.on('connection', (ws) => {
     if (!game || (game !== 'tic-tac-toe' && game !== 'chess')) return;
 
     switch (msg.type) {
-      // ─── Create public ───
       case 'create_public': {
         const hostColor = game === 'chess' ? (msg.color || 'w') : null;
         const roomId = generateId();
@@ -66,7 +70,6 @@ wss.on('connection', (ws) => {
         break;
       }
 
-      // ─── Join public ───
       case 'join_public': {
         let foundRoom = null;
         for (const [id, room] of rooms) {
@@ -110,14 +113,13 @@ wss.on('connection', (ws) => {
         break;
       }
 
-      // ─── Create private ───
       case 'create_private': {
         const code = msg.code;
         if (!code || !/^[A-Za-z0-9]+$/.test(code)) {
           sendTo(ws, { type: 'error', message: 'Invalid code. Use letters and numbers only.' });
           return;
         }
-        // Check if code is already in use
+        // Check if code already in use
         for (const room of rooms.values()) {
           if (room.game === game && !room.public && room.code === code &&
               room.players[0] && room.players[0].readyState === WebSocket.OPEN) {
@@ -146,7 +148,6 @@ wss.on('connection', (ws) => {
         break;
       }
 
-      // ─── Join private (fresh join) ───
       case 'join_private': {
         const code = msg.code;
         if (!code) {
@@ -158,7 +159,6 @@ wss.on('connection', (ws) => {
           if (room.game === game && !room.public && room.code === code &&
               room.players[0] && room.players[0].readyState === WebSocket.OPEN) {
             if (room.players[1] && room.players[1].readyState === WebSocket.OPEN) {
-              // Host already playing with someone else
               sendTo(ws, { type: 'error', message: 'Cannot join this game.' });
               return;
             }
@@ -199,7 +199,6 @@ wss.on('connection', (ws) => {
         break;
       }
 
-      // ─── Rejoin (explicit, uses stored roomId) ───
       case 'rejoin': {
         const { roomId, symbol, code } = msg;
         if (!roomId || !symbol) {
@@ -220,7 +219,6 @@ wss.on('connection', (ws) => {
         const playerIdx = (symbol === 'X' || symbol === 'w') ? 0 : 1;
         const existing = room.players[playerIdx];
         if (existing && existing.readyState !== WebSocket.OPEN) {
-          // Replace the disconnected player
           room.players[playerIdx] = ws;
           ws.roomId = roomId;
           ws.game = game;
@@ -241,7 +239,6 @@ wss.on('connection', (ws) => {
         break;
       }
 
-      // ─── Rematch ───
       case 'rematch': {
         const room = rooms.get(ws.roomId);
         if (!room || room.game !== 'tic-tac-toe') return;
@@ -255,7 +252,6 @@ wss.on('connection', (ws) => {
         break;
       }
 
-      // ─── Leave room ───
       case 'leave_room': {
         if (ws.roomId) {
           const room = rooms.get(ws.roomId);
@@ -318,6 +314,7 @@ wss.on('connection', (ws) => {
   });
 
   ws.on('close', () => {
+    clearInterval(ws._pingInterval);
     if (ws.roomId) {
       const room = rooms.get(ws.roomId);
       if (room) {
