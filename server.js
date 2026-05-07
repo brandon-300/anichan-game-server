@@ -29,6 +29,7 @@ wss.on('connection', (ws) => {
   ws.roomId = null;
   ws.game = null;
   ws.symbol = null;
+  ws.isHost = false;
 
   ws.on('message', (raw) => {
     let msg;
@@ -42,34 +43,37 @@ wss.on('connection', (ws) => {
     if (!game || (game !== 'tic-tac-toe' && game !== 'chess')) return;
 
     switch (msg.type) {
-      // ---------- Create public ----------
+      // ─── Create public ───
       case 'create_public': {
         const hostColor = game === 'chess' ? (msg.color || 'w') : null;
         const roomId = generateId();
         rooms.set(roomId, {
           game,
-          players: [ws],
+          players: [ws, null],
           hostWs: ws,
           public: true,
           code: null,
           hostColor,
           board: game === 'tic-tac-toe' ? Array(9).fill('') : null,
           turn: game === 'tic-tac-toe' ? 'X' : 'w',
+          disconnectTimers: [null, null],
+          hostDisconnected: false,
         });
         ws.roomId = roomId;
         ws.game = game;
         ws.symbol = game === 'tic-tac-toe' ? 'X' : (hostColor || 'w');
+        ws.isHost = true;
         sendTo(ws, { type: 'room_created', roomId, public: true });
         break;
       }
 
-      // ---------- Join public ----------
+      // ─── Join public ───
       case 'join_public': {
         let foundRoom = null;
         for (const [id, room] of rooms) {
           if (room.game === game && room.public &&
-              room.players.length === 1 &&
-              room.players[0].readyState === WebSocket.OPEN) {
+              room.players[0] && room.players[0].readyState === WebSocket.OPEN &&
+              !room.players[1]) {
             foundRoom = room;
             ws.roomId = id;
             break;
@@ -79,159 +83,189 @@ wss.on('connection', (ws) => {
           sendTo(ws, { type: 'error', message: 'No public room available.' });
           return;
         }
-        foundRoom.players.push(ws);
+        foundRoom.players[1] = ws;
         ws.game = game;
         if (game === 'tic-tac-toe') {
           ws.symbol = 'O';
           foundRoom.players.forEach((player, idx) => {
-            const sym = idx === 0 ? 'X' : 'O';
-            player.symbol = sym;
-            sendTo(player, { type: 'start', symbol: sym, turn: 'X' });
+            if (player) {
+              player.symbol = idx === 0 ? 'X' : 'O';
+              player.isHost = idx === 0;
+              sendTo(player, { type: 'start', symbol: player.symbol, turn: 'X' });
+            }
           });
         } else { // chess
           const hostColor = foundRoom.hostColor || 'w';
           const opponentColor = hostColor === 'w' ? 'b' : 'w';
           foundRoom.players.forEach((player, idx) => {
-            const sym = idx === 0 ? hostColor : opponentColor;
-            player.symbol = sym;
-            sendTo(player, { type: 'start', symbol: sym });
+            if (player) {
+              const sym = idx === 0 ? hostColor : opponentColor;
+              player.symbol = sym;
+              player.isHost = idx === 0;
+              sendTo(player, { type: 'start', symbol: sym });
+            }
           });
         }
         break;
       }
 
-      // ---------- Create private ----------
+      // ─── Create private ───
       case 'create_private': {
         const code = msg.code;
         if (!code || !/^[A-Za-z0-9]+$/.test(code)) {
-          sendTo(ws, { type: 'error', message: 'Invalid code. Use letters and numbers only.' });
+          sendTo(ws, { type: 'error', message: 'Invalid code.' });
           return;
         }
         const hostColor = game === 'chess' ? (msg.color || 'w') : null;
         const roomId = generateId();
         rooms.set(roomId, {
           game,
-          players: [ws],
+          players: [ws, null],
           hostWs: ws,
           public: false,
           code,
           hostColor,
           board: game === 'tic-tac-toe' ? Array(9).fill('') : null,
           turn: game === 'tic-tac-toe' ? 'X' : 'w',
+          disconnectTimers: [null, null],
+          hostDisconnected: false,
         });
         ws.roomId = roomId;
         ws.game = game;
         ws.symbol = game === 'tic-tac-toe' ? 'X' : (hostColor || 'w');
+        ws.isHost = true;
         sendTo(ws, { type: 'room_created', roomId, public: false, code });
         break;
       }
 
-      // ---------- Join private ----------
+      // ─── Join private ───
       case 'join_private': {
         const code = msg.code;
         if (!code) {
-          sendTo(ws, { type: 'error', message: 'Please enter a room code.' });
+          sendTo(ws, { type: 'error', message: 'Enter a room code.' });
           return;
         }
         let targetRoom = null;
         for (const [id, room] of rooms) {
-          if (room.game === game &&
-              !room.public &&
-              room.code === code &&
-              room.players.length === 1 &&
-              room.players[0].readyState === WebSocket.OPEN) {
+          if (room.game === game && !room.public && room.code === code &&
+              room.players[0] && room.players[0].readyState === WebSocket.OPEN &&
+              !room.players[1]) {
             targetRoom = room;
             ws.roomId = id;
             break;
           }
         }
         if (!targetRoom) {
-          sendTo(ws, { type: 'error', message: 'No such room found for that pairing code.' });
+          sendTo(ws, { type: 'error', message: 'No such room found for that code.' });
           return;
         }
-        targetRoom.players.push(ws);
+        targetRoom.players[1] = ws;
         ws.game = game;
         if (game === 'tic-tac-toe') {
           ws.symbol = 'O';
           targetRoom.players.forEach((player, idx) => {
-            const sym = idx === 0 ? 'X' : 'O';
-            player.symbol = sym;
-            sendTo(player, { type: 'start', symbol: sym, turn: 'X' });
+            if (player) {
+              player.symbol = idx === 0 ? 'X' : 'O';
+              player.isHost = idx === 0;
+              sendTo(player, { type: 'start', symbol: player.symbol, turn: 'X' });
+            }
           });
         } else { // chess
           const hostColor = targetRoom.hostColor || 'w';
           const opponentColor = hostColor === 'w' ? 'b' : 'w';
           targetRoom.players.forEach((player, idx) => {
-            const sym = idx === 0 ? hostColor : opponentColor;
-            player.symbol = sym;
-            sendTo(player, { type: 'start', symbol: sym });
+            if (player) {
+              const sym = idx === 0 ? hostColor : opponentColor;
+              player.symbol = sym;
+              player.isHost = idx === 0;
+              sendTo(player, { type: 'start', symbol: sym });
+            }
           });
         }
         break;
       }
 
-      // ---------- Reconnect ----------
+      // ─── Reconnect (after disconnect) ───
       case 'reconnect': {
-        const { roomId, symbol } = msg;
+        const { roomId, symbol, code } = msg;
         const room = rooms.get(roomId);
         if (!room) {
           sendTo(ws, { type: 'error', message: 'Room no longer exists.' });
           return;
         }
-        // Find the player slot that matches the symbol
+        if (room.public === false && code !== room.code) {
+          sendTo(ws, { type: 'error', message: 'Incorrect room code.' });
+          return;
+        }
         const playerIdx = (symbol === 'X' || symbol === 'w') ? 0 : 1;
-        const existingPlayer = room.players[playerIdx];
-        if (existingPlayer && existingPlayer.readyState !== WebSocket.OPEN) {
-          // Replace the disconnected player
+        const existing = room.players[playerIdx];
+        if (existing && existing.readyState !== WebSocket.OPEN) {
+          // replace disconnected player
           room.players[playerIdx] = ws;
           ws.roomId = roomId;
           ws.game = game;
           ws.symbol = symbol;
-          // Send current game state to the reconnected player
+          ws.isHost = playerIdx === 0;
+          // clear disconnect timer for that slot
+          if (room.disconnectTimers[playerIdx]) {
+            clearTimeout(room.disconnectTimers[playerIdx]);
+            room.disconnectTimers[playerIdx] = null;
+          }
           sendTo(ws, {
             type: 'resume',
             symbol,
             turn: room.turn,
-            board: room.board,    // for Tic-Tac-Toe
+            board: room.board,
           });
-          // Notify the other player that opponent is back
           const other = room.players[1 - playerIdx];
           if (other && other.readyState === WebSocket.OPEN) {
             sendTo(other, { type: 'opponent_reconnected' });
           }
         } else {
-          sendTo(ws, { type: 'error', message: 'Cannot reconnect at this time.' });
+          sendTo(ws, { type: 'error', message: 'Cannot reconnect to this game.' });
         }
         break;
       }
 
-      // ---------- Rematch (Tic-Tac-Toe) ----------
+      // ─── Rematch (Tic‑Tac‑Toe) ───
       case 'rematch': {
         const room = rooms.get(ws.roomId);
         if (!room || room.game !== 'tic-tac-toe') return;
-        // Reset board and switch starting player
         room.board = Array(9).fill('');
         room.turn = room.turn === 'X' ? 'O' : 'X';
-        // Inform both players of new game
         room.players.forEach((player) => {
           if (player && player.readyState === WebSocket.OPEN) {
-            sendTo(player, {
-              type: 'start',
-              symbol: player.symbol,
-              turn: room.turn,
-            });
+            sendTo(player, { type: 'start', symbol: player.symbol, turn: room.turn });
           }
         });
         break;
       }
 
-      // ---------- Leave room ----------
+      // ─── Leave room ───
       case 'leave_room': {
         if (ws.roomId) {
           const room = rooms.get(ws.roomId);
-          if (room && room.players.length === 1) {
+          if (room && ws.isHost) {
+            // host left → destroy room instantly
+            const other = room.players[1];
+            if (other && other.readyState === WebSocket.OPEN) {
+              sendTo(other, { type: 'room_destroyed', message: 'Host left the game.' });
+              other.close();
+            }
             rooms.delete(ws.roomId);
-            sendTo(ws, { type: 'room_cancelled' });
+          } else if (room) {
+            // opponent left → start 5‑minute timer
+            const playerIdx = ws.symbol === 'X' ? 0 : 1;
+            room.disconnectTimers[playerIdx] = setTimeout(() => {
+              if (room.players[playerIdx] && room.players[playerIdx].readyState !== WebSocket.OPEN) {
+                const host = room.players[0];
+                if (host && host.readyState === WebSocket.OPEN) {
+                  sendTo(host, { type: 'room_destroyed', message: 'Opponent failed to return, this room is now destroyed.' });
+                  setTimeout(() => host.close(), 5000);
+                }
+                rooms.delete(ws.roomId);
+              }
+            }, 300000); // 5 minutes
           }
           ws.roomId = null;
         }
@@ -241,7 +275,7 @@ wss.on('connection', (ws) => {
       case 'chat': {
         const room = rooms.get(ws.roomId);
         if (!room) return;
-        const opponent = room.players.find(p => p !== ws);
+        const opponent = room.players.find(p => p && p !== ws);
         if (opponent && opponent.readyState === WebSocket.OPEN) {
           sendTo(opponent, { type: 'chat', text: msg.text });
         }
@@ -251,12 +285,11 @@ wss.on('connection', (ws) => {
       case 'move': {
         const room = rooms.get(ws.roomId);
         if (!room) return;
-        // Update board for Tic-Tac-Toe
         if (room.game === 'tic-tac-toe' && msg.data.index !== undefined && room.board) {
           room.board[msg.data.index] = ws.symbol;
           room.turn = ws.symbol === 'X' ? 'O' : 'X';
         }
-        const opponent = room.players.find(p => p !== ws);
+        const opponent = room.players.find(p => p && p !== ws);
         if (opponent && opponent.readyState === WebSocket.OPEN) {
           sendTo(opponent, { type: 'move', data: msg.data });
         }
@@ -269,24 +302,33 @@ wss.on('connection', (ws) => {
     if (ws.roomId) {
       const room = rooms.get(ws.roomId);
       if (room) {
-        // Keep the room alive for 30 seconds to allow reconnection
-        // If already waiting, don't overwrite
-        if (!room._disconnectTimer) {
-          room._disconnectTimer = setTimeout(() => {
-            // Remove the room if still not fully connected
-            const active = room.players.some(p => p && p.readyState === WebSocket.OPEN);
-            if (!active) {
+        if (ws.isHost) {
+          // host → destroy room
+          const other = room.players[1];
+          if (other && other.readyState === WebSocket.OPEN) {
+            sendTo(other, { type: 'room_destroyed', message: 'Host left the game.' });
+            other.close();
+          }
+          rooms.delete(ws.roomId);
+        } else {
+          // opponent disconnected → start timer
+          const playerIdx = ws.symbol === 'X' ? 0 : 1;
+          if (room.disconnectTimers[playerIdx]) clearTimeout(room.disconnectTimers[playerIdx]);
+          room.disconnectTimers[playerIdx] = setTimeout(() => {
+            if (room.players[playerIdx] && room.players[playerIdx].readyState !== WebSocket.OPEN) {
+              const host = room.players[0];
+              if (host && host.readyState === WebSocket.OPEN) {
+                sendTo(host, { type: 'room_destroyed', message: 'Opponent failed to return, this room is now destroyed.' });
+                setTimeout(() => host.close(), 5000);
+              }
               rooms.delete(ws.roomId);
-            } else {
-              // If one player is still connected, notify them of disconnect
-              room.players.forEach(p => {
-                if (p && p.readyState === WebSocket.OPEN) {
-                  sendTo(p, { type: 'opponent_disconnected' });
-                }
-              });
             }
-            delete room._disconnectTimer;
-          }, 30000);
+          }, 300000);
+          // notify host
+          const host = room.players[0];
+          if (host && host.readyState === WebSocket.OPEN) {
+            sendTo(host, { type: 'opponent_disconnected' });
+          }
         }
       }
     }
