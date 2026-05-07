@@ -16,7 +16,7 @@ const server = http.createServer((req, res) => {
 const wss = new WebSocket.Server({ server });
 
 const rooms = new Map();
-const tttWaiting = [];
+const tttWaiting = []; // fallback public queue (not used once we have rooms)
 
 function generateId() {
   return Math.random().toString(36).substring(2, 8);
@@ -38,33 +38,33 @@ wss.on('connection', (ws) => {
       return sendTo(ws, { type: 'error', message: 'Invalid JSON' });
     }
 
-    if (msg.game === 'tic-tac-toe') {
-      handleTTT(ws, msg);
-      return;
-    }
-
-    if (msg.game !== 'chess') return;
+    // Allow both 'tic-tac-toe' and 'chess'
+    if (!msg.game || (msg.game !== 'tic-tac-toe' && msg.game !== 'chess')) return;
 
     switch (msg.type) {
+      // ---------- Create public ----------
       case 'create_public': {
+        const hostColor = msg.game === 'chess' ? (msg.color || 'w') : null;
         const roomId = generateId();
         rooms.set(roomId, {
-          game: 'chess',
+          game: msg.game,
           players: [ws],
           hostWs: ws,
           public: true,
           code: null,
+          hostColor,
         });
         ws.roomId = roomId;
-        ws.game = 'chess';
+        ws.game = msg.game;
         sendTo(ws, { type: 'room_created', roomId, public: true });
         break;
       }
 
+      // ---------- Join public ----------
       case 'join_public': {
         let foundRoom = null;
         for (const [id, room] of rooms) {
-          if (room.game === 'chess' && room.public &&
+          if (room.game === msg.game && room.public &&
               room.players.length === 1 &&
               room.players[0].readyState === WebSocket.OPEN) {
             foundRoom = room;
@@ -77,33 +77,45 @@ wss.on('connection', (ws) => {
           return;
         }
         foundRoom.players.push(ws);
-        ws.game = 'chess';
-        foundRoom.players.forEach((player, idx) => {
-          sendTo(player, { type: 'start', symbol: idx === 0 ? 'w' : 'b' });
-        });
+        ws.game = msg.game;
+        if (msg.game === 'tic-tac-toe') {
+          foundRoom.players.forEach((player, idx) => {
+            sendTo(player, { type: 'start', symbol: idx === 0 ? 'X' : 'O' });
+          });
+        } else { // chess
+          const hostColor = foundRoom.hostColor || 'w';
+          const opponentColor = hostColor === 'w' ? 'b' : 'w';
+          foundRoom.players.forEach((player, idx) => {
+            sendTo(player, { type: 'start', symbol: idx === 0 ? hostColor : opponentColor });
+          });
+        }
         break;
       }
 
+      // ---------- Create private ----------
       case 'create_private': {
         const code = msg.code;
         if (!code || !/^[A-Za-z0-9]+$/.test(code)) {
           sendTo(ws, { type: 'error', message: 'Invalid code. Use letters and numbers only.' });
           return;
         }
+        const hostColor = msg.game === 'chess' ? (msg.color || 'w') : null;
         const roomId = generateId();
         rooms.set(roomId, {
-          game: 'chess',
+          game: msg.game,
           players: [ws],
           hostWs: ws,
           public: false,
           code,
+          hostColor,
         });
         ws.roomId = roomId;
-        ws.game = 'chess';
+        ws.game = msg.game;
         sendTo(ws, { type: 'room_created', roomId, public: false, code });
         break;
       }
 
+      // ---------- Join private ----------
       case 'join_private': {
         const code = msg.code;
         if (!code) {
@@ -112,7 +124,7 @@ wss.on('connection', (ws) => {
         }
         let targetRoom = null;
         for (const [id, room] of rooms) {
-          if (room.game === 'chess' &&
+          if (room.game === msg.game &&
               !room.public &&
               room.code === code &&
               room.players.length === 1 &&
@@ -123,23 +135,29 @@ wss.on('connection', (ws) => {
           }
         }
         if (!targetRoom) {
-          sendTo(ws, { type: 'error', message: 'No such room found for that pairing code. Check the code and try again.' });
+          sendTo(ws, { type: 'error', message: 'No such room found for that pairing code.' });
           return;
         }
         targetRoom.players.push(ws);
-        ws.game = 'chess';
-        targetRoom.players.forEach((player, idx) => {
-          sendTo(player, { type: 'start', symbol: idx === 0 ? 'w' : 'b' });
-        });
+        ws.game = msg.game;
+        if (msg.game === 'tic-tac-toe') {
+          targetRoom.players.forEach((player, idx) => {
+            sendTo(player, { type: 'start', symbol: idx === 0 ? 'X' : 'O' });
+          });
+        } else { // chess
+          const hostColor = targetRoom.hostColor || 'w';
+          const opponentColor = hostColor === 'w' ? 'b' : 'w';
+          targetRoom.players.forEach((player, idx) => {
+            sendTo(player, { type: 'start', symbol: idx === 0 ? hostColor : opponentColor });
+          });
+        }
         break;
       }
 
       case 'leave_room': {
-        // player wants to cancel waiting
         if (ws.roomId) {
           const room = rooms.get(ws.roomId);
           if (room && room.players.length === 1) {
-            // delete the empty room
             rooms.delete(ws.roomId);
             sendTo(ws, { type: 'room_cancelled' });
           }
@@ -186,30 +204,6 @@ wss.on('connection', (ws) => {
     if (tttIdx !== -1) tttWaiting.splice(tttIdx, 1);
   });
 });
-
-function handleTTT(ws, msg) {
-  if (msg.type === 'join') {
-    if (tttWaiting.length > 0) {
-      const opp = tttWaiting.shift();
-      const roomId = generateId();
-      rooms.set(roomId, { game: 'tic-tac-toe', players: [opp, ws] });
-      opp.roomId = roomId;
-      ws.roomId = roomId;
-      opp.game = 'tic-tac-toe';
-      ws.game = 'tic-tac-toe';
-      sendTo(opp, { type: 'start', symbol: 'X', turn: 'X' });
-      sendTo(ws, { type: 'start', symbol: 'O', turn: 'X' });
-    } else {
-      tttWaiting.push(ws);
-      sendTo(ws, { type: 'waiting' });
-    }
-  } else if (msg.type === 'move') {
-    const room = rooms.get(ws.roomId);
-    if (!room) return;
-    const opponent = room.players.find(p => p !== ws);
-    if (opponent) sendTo(opponent, { type: 'move', data: msg.data });
-  }
-}
 
 server.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
